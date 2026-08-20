@@ -8,13 +8,12 @@
 // history) instead of the old pendingModel/pastModel calls, which is why
 // notifications weren't showing.
 //
-// UI: no more Pending/Recently tabs — a search field, a
-// "Recent and live notifications" label with a Clear all button, then a
-// single merged, newest-first list below (live + history combined).
+// UI: no more Pending/Recently tabs — a "Recent and live notifications"
+// label with a Clear all button, then a single merged, newest-first list
+// below (live + history combined).
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
-import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -28,7 +27,6 @@ BarWidget {
   property bool popupOpen: false
   function close() { popupOpen = false }
 
-  property string query: ""
   property var filteredRows: []
   property var historyRows: []
 
@@ -45,10 +43,13 @@ BarWidget {
   readonly property var notificationService: hostShell && hostShell.firstPartyServiceFor
     ? hostShell.firstPartyServiceFor("omarchy.notifications") : null
 
-  readonly property int liveCount: notificationService && notificationService.popupModel
-    ? notificationService.popupModel.count : 0
   readonly property string historyDir: notificationService && notificationService.historyDir
     ? String(notificationService.historyDir) : ""
+
+  // Notifications still waiting to be looked at: everything the list shows
+  // (live toasts + recent history), not just what's currently on screen —
+  // a toast that already expired off-screen is still unattended.
+  readonly property int unattendedCount: root.filteredRows.length
 
   // ---- DND (guarded: lives on Omarchy's first-party service, not here).
   readonly property bool dndSupported: !!notificationService
@@ -61,7 +62,7 @@ BarWidget {
 
   readonly property string icon: {
     if (root.dndOn) return "󰂛"
-    if (root.liveCount > 0) return "󱅫"
+    if (root.unattendedCount > 0) return "󱅫"
     return "󰂚"
   }
 
@@ -73,6 +74,15 @@ BarWidget {
   readonly property color colAccent: Color.accent
   readonly property int cardRadius: notificationService && notificationService.cornerRadius
     ? notificationService.cornerRadius : Style.cornerRadius
+
+  // Notification-content palette: mirrors the first-party NotificationCard so
+  // a row in this list matches the same notification's toast appearance,
+  // distinct from the surrounding popup chrome (which uses colForeground).
+  readonly property color notifText: Color.notifications.text
+  readonly property color notifDim: Qt.darker(Color.notifications.text, 1.4)
+  readonly property color notifBody: Qt.darker(Color.notifications.text, 1.15)
+  readonly property color notifBorder: Color.notifications.border
+  readonly property color notifCountdown: Color.notifications.countdown
 
   function notificationIconSource(icon) {
     var value = String(icon || "")
@@ -91,11 +101,22 @@ BarWidget {
     return sameDay ? time : date.toLocaleDateString(Qt.locale(), "MMM d") + " · " + time
   }
 
-  function rowMatches(row) {
-    var needle = root.query.trim().toLowerCase()
-    if (needle === "") return true
-    var haystack = [row.app, row.summary, row.body].join(" ").toLowerCase()
-    return haystack.indexOf(needle) >= 0
+  // ListView.model is bound directly to this plain array, so any reassignment
+  // — even to structurally-identical content — is a full model reset: every
+  // delegate (and its per-row hover state) is destroyed and recreated. The
+  // 500ms poll timer calls rebuildRows() continuously while the popup is
+  // open, so without this guard a row hovered mid-poll would flicker/appear
+  // to double-render on every tick.
+  function rowsEqual(a, b) {
+    if (a.length !== b.length) return false
+    for (var i = 0; i < a.length; i++) {
+      var x = a[i], y = b[i]
+      if (x.id !== y.id || x.isLive !== y.isLive || x.sourceIndex !== y.sourceIndex
+        || x.app !== y.app || x.appIcon !== y.appIcon || x.summary !== y.summary
+        || x.body !== y.body || x.glyph !== y.glyph || x.urgency !== y.urgency
+        || x.timestamp !== y.timestamp) return false
+    }
+    return true
   }
 
   function rebuildRows() {
@@ -103,7 +124,6 @@ BarWidget {
     for (var h = 0; h < root.historyRows.length; ++h) {
       var history = root.historyRows[h]
       if (root.hiddenHistoryKeys[root.historyKey(history)]) continue
-      if (!rowMatches(history)) continue
       rows.push({
         sourceIndex: -1,
         isLive: false,
@@ -118,10 +138,13 @@ BarWidget {
       })
     }
     var model = root.notificationService ? root.notificationService.popupModel : null
-    if (!model) { root.filteredRows = rows; return }
+    if (!model) {
+      if (!rowsEqual(rows, root.filteredRows)) root.filteredRows = rows
+      return
+    }
     for (var i = 0; i < model.count; ++i) {
       var row = model.get(i)
-      if (!row || !rowMatches(row)) continue
+      if (!row) continue
       rows.push({
         sourceIndex: i,
         isLive: true,
@@ -136,7 +159,7 @@ BarWidget {
       })
     }
     rows.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
-    root.filteredRows = rows
+    if (!rowsEqual(rows, root.filteredRows)) root.filteredRows = rows
   }
 
   function dismiss(row) {
@@ -153,11 +176,6 @@ BarWidget {
         root.notificationService.removeHistoryEntry(row.id)
     }
     rebuildRows()
-  }
-
-  function clearSearch() {
-    root.query = ""
-    searchField.text = ""
   }
 
   function clearAll() {
@@ -207,24 +225,29 @@ BarWidget {
 
   onPopupOpenChanged: {
     if (popupOpen) {
-      clearSearch()
       refreshHistory()
       rebuildRows()
-      // Explicitly grab keyboard focus for the search field. Without this,
-      // a wlr-layer-shell popup can render and accept mouse clicks while
-      // still not reliably routing keystrokes to a child TextField, which
-      // is what made typing feel inconsistent.
-      Qt.callLater(function() { if (root.popupOpen) searchField.forceActiveFocus() })
+      // wlr-layer-shell popups can render and accept mouse clicks while
+      // still not reliably routing keystrokes without an explicit grab.
+      Qt.callLater(function() { if (root.popupOpen) popupContent.forceActiveFocus() })
     }
   }
-  onQueryChanged: rebuildRows()
 
+  // Keeps polling regardless of popupOpen: the bar icon's unattendedCount
+  // depends on historyRows too, and a toast that expires or gets dismissed
+  // while the popup is closed still needs to flip it back on. Gating this
+  // on popupOpen (as before) left the icon stuck reporting "no notifications"
+  // between the toast's own timeout and the next time the popup was opened.
+  // DND-silenced notifications never touch popupModel at all — polling is
+  // also the only way those ever reach the icon.
   Timer {
     interval: 500
     repeat: true
-    running: root.popupOpen
+    running: true
     onTriggered: root.refreshHistory()
   }
+
+  Component.onCompleted: root.refreshHistory()
 
   Process {
     id: historyReader
@@ -240,8 +263,12 @@ BarWidget {
     function onCountChanged() { root.rebuildRows() }
     function onDataChanged() { root.rebuildRows() }
     function onRowsInserted() { root.rebuildRows() }
-    function onRowsRemoved() { root.rebuildRows() }
-    function onModelReset() { root.rebuildRows() }
+    // A row leaving popupModel (dismissed or expired) means the service is
+    // archiving it into history right about now — refresh instead of just
+    // rebuilding from the stale cache, so the icon doesn't gap between "left
+    // the live model" and "picked up from history" on the next poll tick.
+    function onRowsRemoved() { root.refreshHistory(); root.rebuildRows() }
+    function onModelReset() { root.refreshHistory(); root.rebuildRows() }
   }
 
   implicitWidth: button.implicitWidth
@@ -252,9 +279,11 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.icon
-    active: root.liveCount > 0 && !root.dndOn
+    active: root.unattendedCount > 0 && !root.dndOn
     tooltipText: root.dndOn ? "DND on — right-click to turn off"
-      : (root.liveCount > 0 ? root.liveCount + " live notifications" : "Notification Center")
+      : (root.unattendedCount > 0
+        ? root.unattendedCount + (root.unattendedCount === 1 ? " notification" : " notifications")
+        : "Notification Center")
 
     onPressed: function(b) {
       if (b === Qt.RightButton) {
@@ -275,115 +304,66 @@ BarWidget {
     contentHeight: popup.cappedContentHeight(Style.space(540))
 
     ColumnLayout {
+      id: popupContent
       anchors.fill: parent
       spacing: Style.space(10)
+      focus: true
+      Keys.onEscapePressed: root.close()
 
       // ----------------------------------------- header
-      RowLayout {
+      PanelHero {
         Layout.fillWidth: true
-        spacing: Style.space(8)
+        title: "Notifications"
+        meta: root.unattendedCount === 1 ? "1 notification" : root.unattendedCount + " notifications"
+        foreground: root.colForeground
+        fontFamily: root.bar ? root.bar.fontFamily : ""
+        iconOpacity: root.unattendedCount > 0 ? 1.0 : 0.6
 
-        Text {
-          text: "Notifications"
-          font.family: root.bar ? root.bar.fontFamily : ""
-          color: root.colForeground
-          font.pixelSize: Style.font.title
-          font.bold: true
+        iconComponent: Component {
+          Text {
+            text: root.icon
+            color: root.dndOn ? root.colDim : (root.unattendedCount > 0 ? root.colAccent : root.colForeground)
+            font.family: root.bar ? root.bar.fontFamily : ""
+            font.pixelSize: Style.font.display
+          }
         }
 
-        Text {
-          text: root.liveCount === 1 ? "1 notification" : root.liveCount + " notifications"
-          font.family: root.bar ? root.bar.fontFamily : ""
-          color: root.colDim
-          font.pixelSize: Style.font.caption
-        }
-
-        Item { Layout.fillWidth: true }
-
-        BorderSurface {
-          id: dndPill
-          visible: root.dndSupported
-          Layout.preferredHeight: Math.max(Style.space(24), Style.font.bodySmall + Style.spacing.controlPaddingY * 2)
-          Layout.preferredWidth: dndLabel.implicitWidth + dndGlyph.implicitWidth + Style.space(18)
-          radius: Math.min(Style.space(12), root.cardRadius + Style.space(6))
-          color: root.dndOn ? root.colAccent : root.colSurface
-          borderSpec: Border.flat(root.dndOn ? root.colAccent : root.colBorder, Style.normalBorderWidth)
-
+        // Compact on/off switch on the trailing edge of the hero, mirroring
+        // how first-party panels (e.g. Tailscale) place their power switch.
+        trailingControl: Component {
           Row {
-            anchors.centerIn: parent
-            spacing: Style.space(4)
+            visible: root.dndSupported
+            spacing: Style.space(6)
 
             Text {
-              id: dndGlyph
-              text: root.dndOn ? "󰂛" : "󰂚"
-              font.family: root.bar ? root.bar.fontFamily : ""
-              color: root.dndOn ? Color.background : root.colDim
-              font.pixelSize: Style.font.body
-              anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
-              id: dndLabel
               text: root.dndOn ? "DND on" : "DND off"
               font.family: root.bar ? root.bar.fontFamily : ""
-              color: root.dndOn ? Color.background : root.colDim
+              color: root.colDim
               font.pixelSize: Style.font.caption
-              font.bold: true
               anchors.verticalCenter: parent.verticalCenter
             }
-          }
 
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.toggleDnd()
-          }
-        }
+            ToggleSwitch {
+              id: dndSwitch
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.dndOn
+              foreground: root.colForeground
+              accent: root.colAccent
+              onToggled: root.toggleDnd()
 
-        BorderSurface {
-          Layout.preferredWidth: Style.space(22)
-          Layout.preferredHeight: Style.space(22)
-          radius: Math.min(Style.space(6), root.cardRadius)
-          color: closeHeaderArea.containsMouse ? root.colBorder : "transparent"
-          borderSpec: Border.flat(root.colBorder, Style.normalBorderWidth)
-
-          Text {
-            anchors.centerIn: parent
-            text: "󰅖"
-            font.family: root.bar ? root.bar.fontFamily : ""
-            color: root.colForeground
-            font.pixelSize: Style.font.caption
-          }
-
-          MouseArea {
-            id: closeHeaderArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.close()
+              PanelToolTip {
+                visible: dndSwitch.containsMouse
+                text: root.dndOn ? "Allow notifications" : "Silence notifications"
+                fontFamily: root.bar ? root.bar.fontFamily : ""
+              }
+            }
           }
         }
       }
 
-      // ----------------------------------------- search
-      TextField {
-        id: searchField
+      PanelSeparator {
         Layout.fillWidth: true
-        placeholderText: "Search notifications"
-        activeFocusOnPress: true
-        onTextEdited: root.query = text
-        Keys.priority: Keys.BeforeItem
-        Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
-            if (root.query.length > 0) {
-              root.clearSearch()
-            } else {
-              root.close()
-            }
-            event.accepted = true
-          }
-        }
+        foreground: root.colForeground
       }
 
       // ----------------------------------------- label + clear all
@@ -393,35 +373,22 @@ BarWidget {
 
         Text {
           Layout.fillWidth: true
-          text: root.query.trim() === "" ? "Recent and live notifications" : root.filteredRows.length + " matching notifications"
+          text: "Recent and live notifications"
           font.family: root.bar ? root.bar.fontFamily : ""
           color: root.colDim
           font.pixelSize: Style.font.caption
         }
 
-        BorderSurface {
-          Layout.preferredWidth: clearLabel.implicitWidth + Style.space(16)
-          Layout.preferredHeight: Math.max(Style.space(22), Style.font.bodySmall + Style.spacing.controlPaddingY * 2)
-          radius: Math.min(Style.space(6), root.cardRadius)
-          color: clearArea.containsMouse ? root.colBorder : "transparent"
-          borderSpec: Border.flat(root.colBorder, Style.normalBorderWidth)
-
-          Text {
-            id: clearLabel
-            anchors.centerIn: parent
-            text: "Clear all"
-            font.family: root.bar ? root.bar.fontFamily : ""
-            color: root.colForeground
-            font.pixelSize: Style.font.caption
-          }
-
-          MouseArea {
-            id: clearArea
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.clearAll()
-          }
+        Button {
+          text: "Clear all"
+          foreground: root.colForeground
+          accent: root.colAccent
+          fontFamily: root.bar ? root.bar.fontFamily : ""
+          fontSize: Style.font.caption
+          horizontalPadding: Style.space(8)
+          verticalPadding: Style.space(4)
+          bordered: true
+          onClicked: root.clearAll()
         }
       }
 
@@ -435,26 +402,46 @@ BarWidget {
         model: root.filteredRows
         visible: count > 0
 
-        delegate: BorderSurface {
+        delegate: CursorSurface {
           id: rowCard
           required property var modelData
 
           readonly property string smallIconSource: root.notificationIconSource(modelData.appIcon)
-          readonly property bool hasIcon: modelData.glyph === "" && smallIconSource.length > 0
           readonly property string sanitizedBody: NotificationLogic.sanitizeBody(modelData.body, modelData.app, modelData.appIcon)
+          readonly property bool singleLineToast: sanitizedBody.length === 0
+          readonly property bool summaryStartsWithGlyph: NotificationLogic.summaryStartsWithGlyph(modelData.summary)
+          // Some senders (e.g. omarchy-action toasts) bake the glyph into the
+          // summary text itself when there's no body to pair it with — skip
+          // the separate glyph slot so it isn't shown twice.
+          readonly property bool collapseRedundantIcon: singleLineToast && modelData.glyph === "" && summaryStartsWithGlyph
+          readonly property bool hasIcon: modelData.glyph === "" && smallIconSource.length > 0
 
           width: listView.width
           implicitHeight: rowContent.implicitHeight + Style.spacing.panelGap
           radius: root.cardRadius
-          color: "transparent"
-          borderSpec: Border.flat(root.colBorder, Style.normalBorderWidth)
+          bordered: true
+          hasCursor: rowHover.hovered
+          foreground: root.notifBorder
+          accent: root.colAccent
 
-          // Left click dismisses. Hover reveals a dedicated close (x)
-          // button as an alternate, more discoverable way to dismiss.
+          // HoverHandler (not MouseArea.containsMouse) tracks row hover: the
+          // dismiss PanelActionButton below has its own hoverEnabled
+          // MouseArea, and a classic MouseArea covering the row would lose
+          // "contains mouse" the instant the pointer crosses onto that
+          // button (the topmost MouseArea claims hover exclusively) — flipping
+          // the button's `visible` off, which put the pointer back over the
+          // row-only area, flipping it on again: a flicker loop right where
+          // you'd hover to dismiss. HoverHandler is a non-exclusive pointer
+          // handler, so it keeps reporting hovered while the pointer is over
+          // a child's own MouseArea. Mirrors NotificationCard.qml's own
+          // hoverTracker.
+          HoverHandler {
+            id: rowHover
+          }
+
+          // Left click dismisses.
           MouseArea {
-            id: rowHoverArea
             anchors.fill: parent
-            hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: root.dismiss(rowCard.modelData)
           }
@@ -470,9 +457,10 @@ BarWidget {
 
             Text {
               Layout.alignment: Qt.AlignTop
-              visible: rowCard.modelData.glyph !== ""
+              visible: rowCard.modelData.glyph !== "" && !rowCard.collapseRedundantIcon
               text: rowCard.modelData.glyph
-              color: rowCard.modelData.urgency === 2 ? Color.urgent : Color.accent
+              color: rowCard.modelData.urgency === 2 ? Color.urgent
+                : (rowCard.modelData.urgency === 0 ? root.notifDim : root.notifCountdown)
               font.family: root.bar ? root.bar.fontFamily : ""
               font.pixelSize: Style.font.icon
             }
@@ -505,14 +493,14 @@ BarWidget {
                   Layout.fillWidth: true
                   text: rowCard.modelData.app
                   font.family: root.bar ? root.bar.fontFamily : ""
-                  color: root.colDim
+                  color: root.notifDim
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
                 }
                 Text {
                   text: root.formatTimestamp(rowCard.modelData.timestamp)
                   font.family: root.bar ? root.bar.fontFamily : ""
-                  color: root.colDim
+                  color: root.notifDim
                   font.pixelSize: Style.font.caption
                 }
               }
@@ -521,8 +509,8 @@ BarWidget {
                 Layout.fillWidth: true
                 visible: rowCard.modelData.summary.length > 0
                 text: rowCard.modelData.summary
-                font.family: root.bar ? root.bar.fontFamily : ""
-                color: root.colForeground
+                font.family: "Liberation Sans"
+                color: root.notifText
                 font.pixelSize: Style.font.subtitle
                 font.bold: true
                 wrapMode: Text.WordWrap
@@ -535,8 +523,8 @@ BarWidget {
                 visible: rowCard.sanitizedBody.length > 0
                 text: rowCard.sanitizedBody
                 textFormat: Text.PlainText
-                font.family: root.bar ? root.bar.fontFamily : ""
-                color: root.colDim
+                font.family: "Liberation Sans"
+                color: root.notifBody
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
                 elide: Text.ElideRight
@@ -545,32 +533,15 @@ BarWidget {
             }
 
             // Close (x): visible ONLY while hovering this row.
-            Rectangle {
-              Layout.preferredWidth: Style.space(20)
-              Layout.preferredHeight: Style.space(20)
+            PanelActionButton {
               Layout.alignment: Qt.AlignVCenter
-              visible: rowHoverArea.containsMouse
-              radius: Math.min(4, root.cardRadius)
-              color: closeArea.containsMouse ? root.colBorder : "transparent"
-
-              Text {
-                anchors.centerIn: parent
-                text: "✕"
-                font.family: root.bar ? root.bar.fontFamily : ""
-                color: root.colDim
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              MouseArea {
-                id: closeArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: function(mouse) {
-                  mouse.accepted = true
-                  root.dismiss(rowCard.modelData)
-                }
-              }
+              visible: rowHover.hovered
+              iconText: "✕"
+              tooltipText: "Dismiss"
+              foreground: root.notifDim
+              fontFamily: root.bar ? root.bar.fontFamily : ""
+              fontSize: Style.font.bodySmall
+              onClicked: function() { root.dismiss(rowCard.modelData) }
             }
           }
         }
@@ -596,7 +567,7 @@ BarWidget {
 
           Text {
             Layout.alignment: Qt.AlignHCenter
-            text: root.query.trim() === "" ? "No notifications" : "No matching notifications"
+            text: "No notifications"
             font.family: root.bar ? root.bar.fontFamily : ""
             color: root.colDim
             font.pixelSize: Style.font.body
