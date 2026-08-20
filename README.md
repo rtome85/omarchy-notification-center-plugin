@@ -4,7 +4,7 @@
 
 A native notification center for **Omarchy**. This plugin is also available on the Omarchy Plugin Marketplace: https://omarchyplugins.com/plugin.html?id=shavanced.notification-center
 
-It adds a searchable panel for live notifications and persistent notification history while continuing to use Omarchy's built-in `omarchy.notifications` service.
+It adds a panel for live notifications and persistent notification history while continuing to use Omarchy's built-in `omarchy.notifications` service.
 
 > **No Mako. No replacement notification daemon. No extra background service.**
 
@@ -20,13 +20,12 @@ In the preview I am using my custom "Ame-quattro" theme, feel free to check: htt
 - **Live notifications** from Omarchy's first-party notification service.
 - **Persistent notification history** maintained by Omarchy.
 - History is shown without replaying old notifications as new popups.
-- Search notifications by application, title, or body.
 - Individual dismissal for live notifications.
 - Clear all live notifications and saved history.
 - Theme-aware Omarchy UI.
 - Optional notification bar widget.
 - Live notification count on the bar widget.
-- `Esc` and the panel controls can be used to close the center.
+- `Esc`, clicking outside the panel, or clicking the bar icon again all close the center.
 - Does not replace Omarchy's normal notification popups.
 
 ## Requirements
