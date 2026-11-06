@@ -3,7 +3,7 @@
   "id": "shavanced.notification-center",
   "name": "Notification Center",
   "version": "1.3.0",
-  "author": "Shavanced",
+  "author": "rtome85",
   "license": "MIT",
   "description": "A native Omarchy notification center with live notifications, persistent history, Do Not Disturb, and a theme-aware bar widget.",
   "kinds": [
@@ -18,5 +18,6 @@
     "category": "System",
     "defaultSection": "right",
     "allowMultiple": false
-  }
+  },
+  "homepage": "https://github.com/rtome85/omarchy-notification-center-plugin"
 }
