@@ -10,7 +10,7 @@ The plugin ID remains `shavanced.notification-center` for compatibility with exi
 
 ## Preview
 
-![Notification center preview](preview.png)
+![Current notification center on Omarchy 4.5](preview-omarchy-4.5.png)
 
 Current panel on Omarchy 4.5.0, captured with sample notifications. Colors and fonts follow your active theme.
 
