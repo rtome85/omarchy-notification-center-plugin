@@ -1,22 +1,11 @@
-// Self-contained bar widget: the popup lives right here, anchored to the
-// icon button via PopupCard, exactly like the original widget (this is what
-// made the old widget position/size itself correctly — PopupCard anchors to
-// anchorItem automatically, no manual screen-edge math needed).
-//
-// Data layer is rewired to the service surface confirmed working in the
-// newer plugin (popupModel for live notifications, historyDir for on-disk
-// history) instead of the old pendingModel/pastModel calls, which is why
-// notifications weren't showing.
-//
-// UI: no more Pending/Recently tabs — a "Recent and live notifications"
-// label with a Clear all button, then a single merged, newest-first list
-// below (live + history combined).
+// Read the daemon's sanitised state; third-party widgets cannot access its service.
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "NotificationLogic.js" as NotificationLogic
 
@@ -26,63 +15,139 @@ BarWidget {
 
   property bool popupOpen: false
   function close() { popupOpen = false }
-
+  function toggle() { popupOpen = !popupOpen }
+  onPopupOpenChanged: {
+    if (popupOpen) Qt.callLater(function() {
+      if (root.popupOpen) popupContent.forceActiveFocus()
+    })
+  }
   property var filteredRows: []
+  property var liveRows: []
   property var historyRows: []
-
-  // Locally-dismissed history entries, hidden until they drop out of the
-  // on-disk history on their own (see dismiss()).
+  // shortcut: dismissals hide history for this shell session; use a daemon API when one exists.
   property var hiddenHistoryKeys: ({})
-  function historyKey(row) {
-    if (row.id !== undefined && row.id !== null && row.id !== 0) return "id:" + row.id
-    return "k:" + row.app + "|" + row.summary + "|" + row.timestamp
+  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/notifications"
+  readonly property int unattendedCount: filteredRows.length
+  property bool dndOn: false
+  readonly property bool dndSupported: true
+  readonly property string icon: dndOn ? "󰂛" : unattendedCount > 0 ? "󱅫" : "󰂚"
+
+  readonly property color colForeground: Commons.Color.foreground
+  readonly property color colDim: Qt.darker(Commons.Color.foreground, 1.4)
+  readonly property color colBorder: Style.normalBorderFor(colForeground, colAccent)
+  readonly property color colSurface: Style.normalFillFor(colForeground, colAccent)
+  readonly property color colAccent: Commons.Color.accent
+  readonly property int cardRadius: Style.cornerRadius
+  readonly property color notifText: Commons.Color.notifications.text
+  readonly property color notifDim: Qt.darker(notifText, 1.4)
+  readonly property color notifBody: Qt.darker(notifText, 1.15)
+  readonly property color notifBorder: Commons.Color.notifications.border
+  readonly property color notifCountdown: Commons.Color.notifications.countdown
+
+  function rebuildRows() {
+    var rows = NotificationLogic.mergeCurrentRows(liveRows, historyRows, hiddenHistoryKeys)
+    if (JSON.stringify(rows) !== JSON.stringify(filteredRows)) filteredRows = rows
   }
+  onLiveRowsChanged: rebuildRows()
+  onHistoryRowsChanged: rebuildRows()
 
-  // Look up the long-running notifications service through the shell host.
-  readonly property var hostShell: bar && bar.shell ? bar.shell : null
-  readonly property var notificationService: hostShell && hostShell.firstPartyServiceFor
-    ? hostShell.firstPartyServiceFor("omarchy.notifications") : null
-
-  readonly property string historyDir: notificationService && notificationService.historyDir
-    ? String(notificationService.historyDir) : ""
-
-  // Notifications still waiting to be looked at: everything the list shows
-  // (live toasts + recent history), not just what's currently on screen —
-  // a toast that already expired off-screen is still unattended.
-  readonly property int unattendedCount: root.filteredRows.length
-
-  // ---- DND (guarded: lives on Omarchy's first-party service, not here).
-  readonly property bool dndSupported: !!notificationService
-    && typeof notificationService.doNotDisturb === "boolean"
-    && typeof notificationService.setDoNotDisturb === "function"
-  readonly property bool dndOn: dndSupported && notificationService.doNotDisturb
   function toggleDnd() {
-    if (dndSupported) notificationService.setDoNotDisturb(!notificationService.doNotDisturb)
+    if (!dndCall.running) dndCall.running = true
+  }
+  Process {
+    id: dndCall
+    command: ["omarchy-shell", "notifications", "toggleDnd"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var state = text.trim()
+        if (state === "on" || state === "off") root.dndOn = state === "on"
+      }
+    }
   }
 
-  readonly property string icon: {
-    if (root.dndOn) return "󰂛"
-    if (root.unattendedCount > 0) return "󱅫"
-    return "󰂚"
+  Process {
+    id: actionCall
+    stdout: StdioCollector { id: actionReply }
+    stderr: StdioCollector { id: actionError }
+    onExited: function(code) {
+      if (code !== 0) console.warn("Notification center action failed:", actionError.text)
+    }
   }
 
-  // Theme palette (mirrors the old widget's tokens).
-  readonly property color colForeground: Color.foreground
-  readonly property color colDim: Qt.darker(Color.foreground, 1.4)
-  readonly property color colBorder: Style.normalBorderFor(Color.foreground, Color.accent)
-  readonly property color colSurface: Style.normalFillFor(Color.foreground, Color.accent)
-  readonly property color colAccent: Color.accent
-  readonly property int cardRadius: notificationService && notificationService.cornerRadius
-    ? notificationService.cornerRadius : Style.cornerRadius
+  function dismiss(row) {
+    if (!row || actionCall.running) return
+    var hidden = Object.assign({}, hiddenHistoryKeys)
+    hidden[row.key] = true
+    hiddenHistoryKeys = hidden
+    // shortcut: Omarchy dismisses by summary substring; identical summaries close together.
+    if (row.isLive && row.summary !== "") {
+      actionCall.command = ["omarchy-shell", "notifications", "dismiss", row.summary]
+      actionCall.running = true
+    }
+    rebuildRows()
+  }
 
-  // Notification-content palette: mirrors the first-party NotificationCard so
-  // a row in this list matches the same notification's toast appearance,
-  // distinct from the surrounding popup chrome (which uses colForeground).
-  readonly property color notifText: Color.notifications.text
-  readonly property color notifDim: Qt.darker(Color.notifications.text, 1.4)
-  readonly property color notifBody: Qt.darker(Color.notifications.text, 1.15)
-  readonly property color notifBorder: Color.notifications.border
-  readonly property color notifCountdown: Color.notifications.countdown
+  function clearAll() {
+    if (actionCall.running) return
+    var hidden = Object.assign({}, hiddenHistoryKeys)
+    for (var i = 0; i < filteredRows.length; i++) hidden[filteredRows[i].key] = true
+    hiddenHistoryKeys = hidden
+    actionCall.command = ["omarchy-shell", "notifications", "dismissAll"]
+    actionCall.running = true
+    rebuildRows()
+  }
+
+  IpcHandler {
+    target: root.moduleName
+    function toggle(): string { root.toggle(); return "ok" }
+    function close(): string { root.broadcast("close"); return "ok" }
+    function toggleDnd(): string { root.toggleDnd(); return "ok" }
+    function dismissKey(key: string): string {
+      var row = root.filteredRows.filter(function(row) { return row.key === key })[0]
+      if (!row) return "missing"
+      root.dismiss(row)
+      return "ok"
+    }
+    function probe(): string {
+      return JSON.stringify({ live: root.liveRows.length, history: root.historyRows.length,
+        action: actionReply.text.trim(), shown: root.filteredRows.length, hidden: Object.keys(root.hiddenHistoryKeys).length, dnd: root.dndOn, opened: root.popupOpen })
+    }
+  }
+
+  FileView {
+    id: liveFile
+    path: root.stateDir + "/live.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.liveRows = NotificationLogic.parseCurrentRows(text(), true)
+    onLoadFailed: root.liveRows = []
+  }
+  FileView {
+    id: historyFile
+    path: root.stateDir + "/history.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.historyRows = NotificationLogic.parseCurrentRows(text(), false)
+    onLoadFailed: root.historyRows = []
+  }
+  FileView {
+    id: quietFile
+    path: root.stateDir + "/quiet.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try { root.dndOn = JSON.parse(text()).dnd === true } catch (e) {}
+    }
+  }
+  Timer {
+    interval: 2000
+    running: true
+    repeat: true
+    onTriggered: { liveFile.reload(); historyFile.reload(); quietFile.reload() }
+  }
 
   function notificationIconSource(icon) {
     var value = String(icon || "")
@@ -99,176 +164,6 @@ BarWidget {
       && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
     var time = date.toLocaleTimeString(Qt.locale(), "hh:mm")
     return sameDay ? time : date.toLocaleDateString(Qt.locale(), "MMM d") + " · " + time
-  }
-
-  // ListView.model is bound directly to this plain array, so any reassignment
-  // — even to structurally-identical content — is a full model reset: every
-  // delegate (and its per-row hover state) is destroyed and recreated. The
-  // 500ms poll timer calls rebuildRows() continuously while the popup is
-  // open, so without this guard a row hovered mid-poll would flicker/appear
-  // to double-render on every tick.
-  function rowsEqual(a, b) {
-    if (a.length !== b.length) return false
-    for (var i = 0; i < a.length; i++) {
-      var x = a[i], y = b[i]
-      if (x.id !== y.id || x.isLive !== y.isLive || x.sourceIndex !== y.sourceIndex
-        || x.app !== y.app || x.appIcon !== y.appIcon || x.summary !== y.summary
-        || x.body !== y.body || x.glyph !== y.glyph || x.urgency !== y.urgency
-        || x.timestamp !== y.timestamp) return false
-    }
-    return true
-  }
-
-  function rebuildRows() {
-    var rows = []
-    for (var h = 0; h < root.historyRows.length; ++h) {
-      var history = root.historyRows[h]
-      if (root.hiddenHistoryKeys[root.historyKey(history)]) continue
-      rows.push({
-        sourceIndex: -1,
-        isLive: false,
-        id: history.id,
-        app: history.app,
-        appIcon: history.appIcon,
-        summary: history.summary,
-        body: history.body,
-        glyph: history.glyph,
-        urgency: history.urgency,
-        timestamp: history.timestamp
-      })
-    }
-    var model = root.notificationService ? root.notificationService.popupModel : null
-    if (!model) {
-      if (!rowsEqual(rows, root.filteredRows)) root.filteredRows = rows
-      return
-    }
-    for (var i = 0; i < model.count; ++i) {
-      var row = model.get(i)
-      if (!row) continue
-      rows.push({
-        sourceIndex: i,
-        isLive: true,
-        id: row.id !== undefined ? row.id : null,
-        app: String(row.appName || row.app || "Unknown application"),
-        appIcon: String(row.appIcon || ""),
-        summary: String(row.summary || "Notification"),
-        body: String(row.body || ""),
-        glyph: String(row.glyph || NotificationLogic.glyphFromHints(row.hints)),
-        urgency: Number(row.urgency || 1),
-        timestamp: Number(row.timestamp || 0)
-      })
-    }
-    rows.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
-    if (!rowsEqual(rows, root.filteredRows)) root.filteredRows = rows
-  }
-
-  function dismiss(row) {
-    if (!row) return
-    if (row.isLive) {
-      if (root.notificationService && typeof root.notificationService.dismissPopup === "function")
-        root.notificationService.dismissPopup(row.sourceIndex)
-    } else {
-      var key = root.historyKey(row)
-      var next = Object.assign({}, root.hiddenHistoryKeys)
-      next[key] = true
-      root.hiddenHistoryKeys = next
-      if (root.notificationService && typeof root.notificationService.removeHistoryEntry === "function")
-        root.notificationService.removeHistoryEntry(row.id)
-    }
-    rebuildRows()
-  }
-
-  function clearAll() {
-    if (!root.notificationService) return
-    if (typeof root.notificationService.clearPopups === "function") root.notificationService.clearPopups()
-    if (typeof root.notificationService.clearHistory === "function") root.notificationService.clearHistory()
-    root.historyRows = []
-    root.hiddenHistoryKeys = ({})
-    rebuildRows()
-  }
-
-  function parseHistory(raw) {
-    var parsed = []
-    var lines = String(raw || "").split("\n")
-    for (var i = 0; i < lines.length; ++i) {
-      var line = lines[i].trim()
-      if (!line) continue
-      try {
-        var value = JSON.parse(line)
-        if (!value || typeof value !== "object") continue
-        parsed.push({
-          id: value.id !== undefined ? value.id : (value.originalId !== undefined ? value.originalId : null),
-          app: String(value.app || "Unknown application"),
-          appIcon: String(value.appIcon || ""),
-          summary: String(value.summary || "Notification"),
-          body: String(value.body || ""),
-          glyph: String(value.glyph || ""),
-          urgency: Number(value.urgency === undefined ? 1 : value.urgency),
-          timestamp: Number(value.timestamp || 0)
-        })
-      } catch (e) {
-        // A torn write is ignored, matching the first-party parser.
-      }
-    }
-    parsed.sort(function(a, b) { return b.timestamp - a.timestamp })
-    root.historyRows = parsed.slice(0, root.notificationService && root.notificationService.historyLimit
-      ? Number(root.notificationService.historyLimit) : 10)
-    rebuildRows()
-  }
-
-  function refreshHistory() {
-    if (!root.historyDir || historyReader.running) return
-    historyReader.command = ["bash", "-c",
-      "awk 1 \"$1\"/*.json 2>/dev/null || true", "--", root.historyDir]
-    historyReader.running = true
-  }
-
-  onPopupOpenChanged: {
-    if (popupOpen) {
-      refreshHistory()
-      rebuildRows()
-      // wlr-layer-shell popups can render and accept mouse clicks while
-      // still not reliably routing keystrokes without an explicit grab.
-      Qt.callLater(function() { if (root.popupOpen) popupContent.forceActiveFocus() })
-    }
-  }
-
-  // Keeps polling regardless of popupOpen: the bar icon's unattendedCount
-  // depends on historyRows too, and a toast that expires or gets dismissed
-  // while the popup is closed still needs to flip it back on. Gating this
-  // on popupOpen (as before) left the icon stuck reporting "no notifications"
-  // between the toast's own timeout and the next time the popup was opened.
-  // DND-silenced notifications never touch popupModel at all — polling is
-  // also the only way those ever reach the icon.
-  Timer {
-    interval: 500
-    repeat: true
-    running: true
-    onTriggered: root.refreshHistory()
-  }
-
-  Component.onCompleted: root.refreshHistory()
-
-  Process {
-    id: historyReader
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.parseHistory(text)
-    }
-  }
-
-  Connections {
-    target: root.notificationService ? root.notificationService.popupModel : null
-    function onCountChanged() { root.rebuildRows() }
-    function onDataChanged() { root.rebuildRows() }
-    function onRowsInserted() { root.rebuildRows() }
-    // A row leaving popupModel (dismissed or expired) means the service is
-    // archiving it into history right about now — refresh instead of just
-    // rebuilding from the stale cache, so the icon doesn't gap between "left
-    // the live model" and "picked up from history" on the next poll tick.
-    function onRowsRemoved() { root.refreshHistory(); root.rebuildRows() }
-    function onModelReset() { root.refreshHistory(); root.rebuildRows() }
   }
 
   implicitWidth: button.implicitWidth
@@ -321,6 +216,7 @@ BarWidget {
 
         iconComponent: Component {
           Text {
+            textFormat: Text.PlainText
             text: root.icon
             color: root.dndOn ? root.colDim : (root.unattendedCount > 0 ? root.colAccent : root.colForeground)
             font.family: root.bar ? root.bar.fontFamily : ""
@@ -336,6 +232,7 @@ BarWidget {
             spacing: Style.space(6)
 
             Text {
+              textFormat: Text.PlainText
               text: root.dndOn ? "DND on" : "DND off"
               font.family: root.bar ? root.bar.fontFamily : ""
               color: root.colDim
@@ -372,6 +269,7 @@ BarWidget {
         spacing: Style.space(8)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: "Recent and live notifications"
           font.family: root.bar ? root.bar.fontFamily : ""
@@ -456,10 +354,11 @@ BarWidget {
             spacing: Style.space(10)
 
             Text {
+              textFormat: Text.PlainText
               Layout.alignment: Qt.AlignTop
               visible: rowCard.modelData.glyph !== "" && !rowCard.collapseRedundantIcon
               text: rowCard.modelData.glyph
-              color: rowCard.modelData.urgency === 2 ? Color.urgent
+              color: rowCard.modelData.urgency === 2 ? Commons.Color.urgent
                 : (rowCard.modelData.urgency === 0 ? root.notifDim : root.notifCountdown)
               font.family: root.bar ? root.bar.fontFamily : ""
               font.pixelSize: Style.font.icon
@@ -490,6 +389,7 @@ BarWidget {
               RowLayout {
                 Layout.fillWidth: true
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: rowCard.modelData.app
                   font.family: root.bar ? root.bar.fontFamily : ""
@@ -498,6 +398,7 @@ BarWidget {
                   elide: Text.ElideRight
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.formatTimestamp(rowCard.modelData.timestamp)
                   font.family: root.bar ? root.bar.fontFamily : ""
                   color: root.notifDim
@@ -506,6 +407,7 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: rowCard.modelData.summary.length > 0
                 text: rowCard.modelData.summary
@@ -519,10 +421,10 @@ BarWidget {
               }
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 visible: rowCard.sanitizedBody.length > 0
                 text: rowCard.sanitizedBody
-                textFormat: Text.PlainText
                 font.family: "Liberation Sans"
                 color: root.notifBody
                 font.pixelSize: Style.font.bodySmall
@@ -558,6 +460,7 @@ BarWidget {
           spacing: Style.space(6)
 
           Text {
+            textFormat: Text.PlainText
             Layout.alignment: Qt.AlignHCenter
             text: "󰂚"
             font.family: root.bar ? root.bar.fontFamily : ""
@@ -566,6 +469,7 @@ BarWidget {
           }
 
           Text {
+            textFormat: Text.PlainText
             Layout.alignment: Qt.AlignHCenter
             text: "No notifications"
             font.family: root.bar ? root.bar.fontFamily : ""
@@ -577,8 +481,9 @@ BarWidget {
 
       // ----------------------------------------- footer legend
       Text {
+        textFormat: Text.PlainText
         Layout.fillWidth: true
-        text: "Left-click or hover the ✕ to dismiss · Esc closes"
+        text: "Dismiss hides history until shell restart · Esc closes"
         font.family: root.bar ? root.bar.fontFamily : ""
         color: Qt.darker(root.colForeground, 1.55)
         font.pixelSize: Style.font.caption

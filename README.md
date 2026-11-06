@@ -20,8 +20,8 @@ In the preview I am using my custom "Ame-quattro" theme, feel free to check: htt
 - **Live notifications** from Omarchy's first-party notification service.
 - **Persistent notification history** maintained by Omarchy.
 - History is shown without replaying old notifications as new popups.
-- Individual dismissal for live notifications.
-- Clear all live notifications and saved history.
+- Individual dismissal for live notifications; history dismissal hides the entry for this shell session.
+- Clear all live notifications and hide current history from this panel until the shell restarts.
 - Theme-aware Omarchy UI.
 - Optional notification bar widget.
 - Live notification count on the bar widget.
@@ -83,7 +83,7 @@ omarchy-shell shell rescanPlugins
 Open the notification center through Omarchy's shell IPC:
 
 ```bash
-omarchy-shell shell toggle shavanced.notification-center '{}'
+omarchy-shell shavanced.notification-center toggle
 ```
 
 The notification bar widget can be added/positioned through Omarchy's plugin/bar controls.
@@ -128,7 +128,8 @@ dismissal API or a read/unread API, so:
 
 - Individual dismissal is available for live notifications.
 - Historical notifications follow Omarchy's stored history.
-- Clear All can clear the available live notifications and saved history.
+- Clear All dismisses live notifications and hides current history in this panel until shell restart.
+- Verification messages are redacted in saved state; dismissing one hides it here but may leave the live toast until it expires.
 - The number of retained historical entries is determined by Omarchy.
 
 These limitations may change as Omarchy's notification API evolves.
@@ -151,13 +152,14 @@ omarchy plugin validate .
 Lint:
 
 ```bash
-qmllint NotificationCenter.qml BarWidget.qml
+node scripts/test-current-state.js
+qmlformat BarWidget.qml >/dev/null
 ```
 
-After editing a local plugin:
+After editing the working copy, sync it and restart the shell:
 
 ```bash
-omarchy-shell shell rescanPlugins
+scripts/dev-sync.sh
 ```
 ## Security
 
@@ -168,3 +170,14 @@ before enabling it.
 ## License
 
 MIT
+
+## Current Omarchy compatibility
+
+Reads the daemon's sanitised `live.json`, `history.json` and `quiet.json` under
+`~/.local/state/omarchy/notifications/`; no direct access to private service objects.
+DND and dismissing live notifications use shell IPC. Omarchy dismisses by summary
+substring, so matching live notifications can close together. Dismissing history hides it
+in this panel until the shell restarts; it does not erase Omarchy's saved history.
+No separate notification archive is created.
+
+Run the parser regression checks with `node scripts/test-current-state.js`.

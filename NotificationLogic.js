@@ -221,8 +221,45 @@ function imageExtension(srcPath) {
   return ext
 }
 
+// Current Omarchy persistence uses bounded arrays, stable keys, and seconds.
+function parseCurrentRows(raw, isLive) {
+  var text = String(raw || "")
+  if (text.length > 3276800) return []
+  var entries
+  try { entries = JSON.parse(text) } catch (e) { return [] }
+  if (!Array.isArray(entries)) return []
+  return entries.slice(0, 100).filter(function(e) {
+    return e && typeof e.key === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(e.key)
+      && typeof e.ts === "number" && isFinite(e.ts) && e.ts > 0
+  }).map(function(e) {
+    return {
+      key: e.key,
+      originalId: Number.isInteger(e.originalId) && e.originalId > 0 && e.originalId <= 4294967295 ? e.originalId : 0,
+      isLive: !!isLive,
+      app: String(e.app || "Unknown application").slice(0, 256),
+      appIcon: /^[A-Za-z0-9_.-]{1,256}$/.test(e.appIcon || "") ? e.appIcon : "",
+      summary: String(e.summary || "").slice(0, 4096),
+      body: String(e.body || "").slice(0, 16384),
+      glyph: String(e.glyph || "").slice(0, 16),
+      urgency: e.urgency === 2 ? 2 : e.urgency === 0 ? 0 : 1,
+      timestamp: e.ts * 1000
+    }
+  })
+}
+
+function mergeCurrentRows(live, history, hidden) {
+  var seen = Object.create(null)
+  return live.concat(history).filter(function(row) {
+    if (seen[row.key] || hidden[row.key]) return false
+    seen[row.key] = true
+    return true
+  }).sort(function(a, b) { return b.timestamp - a.timestamp })
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    parseCurrentRows: parseCurrentRows,
+    mergeCurrentRows: mergeCurrentRows,
     isChromiumDerived: isChromiumDerived,
     sanitizeBody: sanitizeBody,
     summaryStartsWithGlyph: summaryStartsWithGlyph,
