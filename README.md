@@ -12,15 +12,14 @@ The plugin ID remains `shavanced.notification-center` for compatibility with exi
 
 ![Notification center preview](preview.png)
 
-The preview comes from the original project and shows Shavanced's
-[Ame-quattro theme](https://github.com/Shavanced/ame-quattro). It may differ from the current version.
+Current panel on Omarchy 4.5.0, captured with sample notifications. Colors and fonts follow your active theme.
 
 ## Requirements
 
 - Omarchy with Quickshell and its built-in `omarchy.notifications` service.
 - The current notification state format: `live.json`, `history.json`, and `quiet.json` under `~/.local/state/omarchy/notifications/`.
 
-Tested locally on Omarchy `4.0.0.alpha` on 6 November 2026. Older notification implementations using individual history files are not supported by this version.
+Tested locally on Omarchy `4.5.0` (Arch package `4.5.0-3`) on 6 November 2026, verified with `omarchy version`. Older notification implementations using individual history files are not supported by this version.
 
 ## Install
 
